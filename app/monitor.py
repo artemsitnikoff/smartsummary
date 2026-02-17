@@ -9,6 +9,7 @@ from telethon import TelegramClient, events
 
 from app.bitrix import create_meeting, find_user_by_nickname, resolve_email_user
 from app.config import settings
+from app.jira import create_issue as jira_create_issue
 
 logger = logging.getLogger("smartsummary")
 
@@ -229,6 +230,43 @@ def setup_handlers(client: TelegramClient):
                 logger.info("*** SENT reply: %s", fact)
             except Exception as e:
                 logger.error("*** ERROR getting pig fact: %s", e, exc_info=True)
+
+        # триггер "создай задачу" — создаёт issue в Jira
+        if re.match(r"(?i)(сделай|создай)\s+задачу", text):
+            logger.info("*** TRIGGER: 'создай задачу' in chat=%s from sender=%s", chat_id, sender)
+            try:
+                body = re.sub(r"(?i)^(сделай|создай)\s+задачу\s*", "", text).strip()
+                # ключ проекта — первое слово из заглавных букв
+                key_match = re.search(r"\b([A-Z][A-Z0-9]{1,9})\b", body)
+                if not key_match:
+                    await event.reply("❌ Укажи проект: Создай задачу DC")
+                    return
+                project_key = key_match.group(1)
+
+                reply_msg = await event.get_reply_message()
+                if not reply_msg or not reply_msg.raw_text:
+                    await event.reply("❌ Реплайни на сообщение с текстом задачи")
+                    return
+
+                full_text = reply_msg.raw_text.strip()
+                # summary: до первой точки/переноса или первые 100 символов
+                short = full_text.split("\n")[0].split(". ")[0]
+                summary = short[:100] if len(short) > 100 else short
+                description = full_text
+
+                result = await jira_create_issue(project_key, summary, description)
+                issue_key = result["key"]
+                jira_base = settings.jira_url.rstrip("/")
+                await event.reply(
+                    f"✅ Задача создана: {issue_key}\n"
+                    f"📝 {summary}\n"
+                    f"🔗 {jira_base}/browse/{issue_key}"
+                )
+                logger.info("*** Jira issue created: %s", issue_key)
+            except Exception as e:
+                logger.error("*** ERROR creating Jira issue: %s", e, exc_info=True)
+                await event.reply(f"❌ Ошибка создания задачи: {e}")
+            return
 
         # триггер "сделай встречу"
         if re.match(r"(?i)(сделай|создай)\s+встречу", text):

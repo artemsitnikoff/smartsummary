@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     bitrix_domain: str = ""  # например "company.bitrix24.ru"
     bitrix_refresh_token: str = ""  # начальный refresh_token
 
+    # Jira Server (Basic auth)
+    jira_url: str = ""  # https://jira.dclouds.ru
+    jira_username: str = ""
+    jira_password: str = ""
+
     # группы для дневного отчёта (справочники)
     report_group_ids: list[int] = [-1001408128567]  # Digital Clouds
 
