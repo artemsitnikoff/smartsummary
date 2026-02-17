@@ -1,0 +1,12 @@
+.env
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+.venv/
+bitrix_tokens.json
+.claude/
