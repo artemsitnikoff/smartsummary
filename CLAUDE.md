@@ -18,7 +18,7 @@ app/
   telegram_client.py    # Singleton Telethon client
   monitor.py            # Event handlers, triggers, message buffer, parse_attendees
   summarizer.py         # GPT summarization (single chat, daily overview)
-  bitrix.py             # Bitrix24 OAuth, user search, calendar event creation
+  bitrix.py             # Bitrix24 OAuth, user search, calendar event creation, accessibility
   compliments.py        # Wife compliment generator (disabled)
   date_experiment.py    # Autonomous GPT dialog experiment (with consent)
   api/
@@ -30,7 +30,7 @@ auth.py                 # One-time Telegram authorization script
 
 ### Telegram Event Handling
 - Single handler `on_new_message` in `monitor.py` catches ALL messages (`incoming=True, outgoing=True`)
-- Triggers are checked sequentially: "суммаризация" → "ситников" → "гринкеев" → "сделай/создай встречу"
+- Triggers are checked sequentially: "суммаризация" → "ситников" → "гринкеев" → "создай задачу" → "найди время" → "сделай/создай встречу"
 - `return` after trigger prevents double-processing
 
 ### Bitrix24 Integration
@@ -40,8 +40,17 @@ auth.py                 # One-time Telegram authorization script
 - `find_user_by_nickname()` searches custom field `UF_USR_1678964886664` (with and without @)
 - `resolve_email_user()` chains: regular user search → email guest cache lookup
 
+### Free Slot Finder
+- Trigger: `найди\s+время` (e.g. "Найди время @nick1 @nick2")
+- Resolves @nicknames via `find_user_by_nickname()` → Bitrix user IDs
+- Calls `get_users_accessibility()` → `calendar.accessibility.get` API
+- Computes 5 business days forward (skips Sat/Sun)
+- For each day: collects busy intervals, converts to Novosibirsk time using `~USER_OFFSET_FROM`, merges overlapping intervals, finds gaps in 9:00–19:00 window
+- Filters slots < 30 min
+- Helper functions: `_parse_bitrix_dt()`, `_merge_intervals()`
+
 ### Meeting Creation Flow
-1. Parse time/date from text (`parse_meeting_time`)
+1. Parse time/date from text (`parse_meeting_time`) — supports `HH:MM` / `HHMM` time and `DD.MM` / `DD месяц` date formats
 2. Parse @nicknames and emails (`parse_attendees`) — emails removed from text before @nick extraction to avoid domain-as-nick false positives
 3. Resolve nicknames via Bitrix `user.get` by custom field
 4. Resolve emails: first `user.get` by EMAIL, then email guest cache via `im.user.list.get`

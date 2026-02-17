@@ -13,11 +13,29 @@ Telegram userbot for chat monitoring, AI summarization, and Bitrix24 calendar in
 - **"Гринкеев"** trigger: responds with a rare pig fact (GPT-generated, high temperature for creativity)
 - **"Ситников"** trigger: responds with a Seneca quote
 
+### Free Slot Finder (Bitrix24)
+Write in any chat:
+```
+Найди время @ivan @petrov @sidorov
+```
+
+The bot will:
+- Look up @nicknames in Bitrix24
+- Fetch calendar availability for the next 5 business days (Mon-Fri)
+- Find common free slots within working hours (9:00–19:00, Asia/Novosibirsk)
+- Handle timezone offsets for users in different timezones
+- Filter out slots shorter than 30 minutes
+- Reply with a day-by-day breakdown of available time
+
 ### Meeting Creation (Bitrix24)
 Write in any chat:
 ```
-Сделай встречу 1600 18 февраля @ivan @petrov user@mail.ru
+Сделай встречу 16:00 18.02 @ivan @petrov user@mail.ru
 ```
+
+Supported formats:
+- **Time**: `16:00` or `1600`
+- **Date**: `18.02` or `18 февраля`
 
 The bot will:
 - Parse time, date, @nicknames, and email addresses from the message
