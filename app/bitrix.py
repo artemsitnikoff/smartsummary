@@ -179,6 +179,25 @@ async def resolve_email_user(email: str) -> tuple[int | None, str | None]:
     return None, None
 
 
+async def get_users_accessibility(user_ids: list[int], date_from: str, date_to: str) -> dict:
+    """Get busy slots for users via calendar.accessibility.get.
+
+    Args:
+        user_ids: list of Bitrix user IDs
+        date_from: start date in YYYY-MM-DD format
+        date_to: end date in YYYY-MM-DD format
+
+    Returns:
+        Raw result dict: {user_id_str: [{DATE_FROM, DATE_TO, ACCESSIBILITY}, ...], ...}
+    """
+    result = await _bitrix_request("calendar.accessibility.get", {
+        "users": user_ids,
+        "from": date_from,
+        "to": date_to,
+    })
+    return result.get("result", {})
+
+
 async def create_meeting(
     title: str,
     date: datetime,

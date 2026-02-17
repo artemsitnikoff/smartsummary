@@ -2,12 +2,12 @@ import logging
 import random
 import re
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 
-from app.bitrix import create_meeting, find_user_by_nickname, resolve_email_user
+from app.bitrix import create_meeting, find_user_by_nickname, get_users_accessibility, resolve_email_user
 from app.config import settings
 from app.jira import create_issue as jira_create_issue
 
@@ -128,24 +128,36 @@ def parse_meeting_time(text: str) -> tuple[datetime | None, str | None]:
     # strip the command prefix
     body = re.sub(r"(?i)^(сделай|создай)\s+встречу\s*", "", text).strip()
 
-    # parse time: 3-4 digits like 1600, 900
-    time_match = re.search(r"\b(\d{3,4})\b", body)
-    if not time_match:
-        return None, "Укажи время, например: сделай встречу 1600 27 февраля"
-    raw_time = time_match.group(1).zfill(4)
-    hour, minute = int(raw_time[:2]), int(raw_time[2:])
+    # parse time: "16:00", "9:00" or 3-4 digits like 1600, 900
+    time_match = re.search(r"\b(\d{1,2}):(\d{2})\b", body)
+    if time_match:
+        hour, minute = int(time_match.group(1)), int(time_match.group(2))
+    else:
+        time_match = re.search(r"\b(\d{3,4})\b", body)
+        if not time_match:
+            return None, "Укажи время, например: сделай встречу 16:00 27 февраля"
+        raw_time = time_match.group(1).zfill(4)
+        hour, minute = int(raw_time[:2]), int(raw_time[2:])
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None, f"Некорректное время: {raw_time}"
 
-    # parse date: "DD месяц"
+    # parse date: "DD месяц" or "DD.MM"
     now = datetime.now()
     date_match = re.search(
         r"(\d{1,2})\s+(" + "|".join(MONTHS_RU.keys()) + r")",
         body.lower(),
     )
+    num_date_match = re.search(r"\b(\d{1,2})\.(\d{2})\b", body) if not date_match else None
     if date_match:
         day = int(date_match.group(1))
         month = MONTHS_RU[date_match.group(2)]
+    elif num_date_match:
+        day = int(num_date_match.group(1))
+        month = int(num_date_match.group(2))
+    else:
+        day = month = None
+
+    if day is not None:
         year = now.year
         try:
             dt = datetime(year, month, day, hour, minute)
@@ -176,6 +188,31 @@ def parse_attendees(text: str) -> tuple[list[str], list[str]]:
         cleaned = cleaned.replace(email, "")
     nicknames = NICK_RE.findall(cleaned)
     return nicknames, emails
+
+
+def _parse_bitrix_dt(s: str) -> datetime:
+    """Parse Bitrix datetime string like '17.02.2026 09:00:00' or '2026-02-17T09:00:00+07:00'."""
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=None)  # strip tz for local comparison
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse Bitrix datetime: {s}")
+
+
+def _merge_intervals(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    """Merge overlapping/adjacent intervals. Returns sorted, non-overlapping list."""
+    if not intervals:
+        return []
+    sorted_iv = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_iv[0]]
+    for start, end in sorted_iv[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def setup_handlers(client: TelegramClient):
@@ -266,6 +303,123 @@ def setup_handlers(client: TelegramClient):
             except Exception as e:
                 logger.error("*** ERROR creating Jira issue: %s", e, exc_info=True)
                 await event.reply(f"❌ Ошибка создания задачи: {e}")
+            return
+
+        # триггер "найди время" — поиск свободных слотов
+        if re.match(r"(?i)найди\s+время", text):
+            logger.info("*** TRIGGER: 'найди время' in chat=%s from sender=%s", chat_id, sender)
+            try:
+                nicknames, _ = parse_attendees(text)
+                if not nicknames:
+                    await event.reply("Укажи участников: Найди время @nick1 @nick2")
+                    return
+
+                # resolve nicknames to Bitrix user IDs
+                user_ids: list[int] = []
+                user_names: list[str] = []
+                not_found: list[str] = []
+                for nick in nicknames:
+                    uid, full_name = await find_user_by_nickname(nick)
+                    if uid:
+                        user_ids.append(uid)
+                        user_names.append(f"@{nick}")
+                    else:
+                        not_found.append(f"@{nick}")
+
+                if not user_ids:
+                    msg = "❌ Никого не удалось найти в Bitrix"
+                    if not_found:
+                        msg += f"\n⚠️ Не найден: {', '.join(not_found)}"
+                    await event.reply(msg)
+                    return
+
+                # compute 5 business days forward
+                today = datetime.now().date()
+                work_days: list = []
+                d = today
+                while len(work_days) < 5:
+                    if d.weekday() < 5:  # Mon-Fri
+                        work_days.append(d)
+                    d += timedelta(days=1)
+
+                date_from = work_days[0].strftime("%Y-%m-%d")
+                date_to = work_days[-1].strftime("%Y-%m-%d")
+
+                accessibility = await get_users_accessibility(user_ids, date_from, date_to)
+
+                # build free slots per day
+                DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+                lines: list[str] = []
+                lines.append(f"📅 Свободные слоты для {', '.join(user_names)}:")
+                if not_found:
+                    lines.append(f"⚠️ Не найден: {', '.join(not_found)}")
+                lines.append("")
+
+                for day in work_days:
+                    day_start = datetime.combine(day, datetime.min.time().replace(hour=9))
+                    day_end = datetime.combine(day, datetime.min.time().replace(hour=19))
+
+                    # collect all busy intervals for this day across all users
+                    busy_intervals: list[tuple[datetime, datetime]] = []
+                    for uid in user_ids:
+                        slots = accessibility.get(str(uid), [])
+                        for slot in slots:
+                            acc = slot.get("ACCESSIBILITY", "busy")
+                            if acc in ("free",):
+                                continue
+                            try:
+                                dt_from = _parse_bitrix_dt(slot["DATE_FROM"])
+                                dt_to = _parse_bitrix_dt(slot["DATE_TO"])
+                                # convert to Novosibirsk time using USER_OFFSET
+                                offset_from = int(slot.get("~USER_OFFSET_FROM", 0))
+                                offset_to = int(slot.get("~USER_OFFSET_TO", 0))
+                                dt_from -= timedelta(seconds=offset_from)
+                                dt_to -= timedelta(seconds=offset_to)
+                            except Exception as e:
+                                logger.warning("Skip slot parse error: %s | %s", e, slot)
+                                continue
+                            if dt_to <= day_start or dt_from >= day_end:
+                                continue
+                            # clip to work hours
+                            busy_intervals.append((
+                                max(dt_from, day_start),
+                                min(dt_to, day_end),
+                            ))
+
+                    # merge overlapping intervals
+                    merged = _merge_intervals(busy_intervals)
+
+                    # compute free slots as gaps between merged busy intervals
+                    free_slots: list[tuple[datetime, datetime]] = []
+                    cursor = day_start
+                    for b_start, b_end in merged:
+                        if cursor < b_start:
+                            free_slots.append((cursor, b_start))
+                        cursor = max(cursor, b_end)
+                    if cursor < day_end:
+                        free_slots.append((cursor, day_end))
+
+                    # filter out slots shorter than 30 minutes
+                    free_slots = [(s, e) for s, e in free_slots if (e - s) >= timedelta(minutes=30)]
+
+                    day_label = f"{DAY_NAMES[day.weekday()]}, {day.strftime('%d.%m')}"
+                    if not free_slots:
+                        lines.append(f"{day_label}:")
+                        lines.append("  нет свободных слотов")
+                    else:
+                        lines.append(f"{day_label}:")
+                        for slot_start, slot_end in free_slots:
+                            s = slot_start.strftime("%H:%M")
+                            e = slot_end.strftime("%H:%M")
+                            suffix = " (весь день)" if s == "09:00" and e == "19:00" else ""
+                            lines.append(f"  {s}–{e}{suffix}")
+                    lines.append("")
+
+                await event.reply("\n".join(lines).rstrip())
+                logger.info("*** SENT free slots for %s", user_names)
+            except Exception as e:
+                logger.error("*** ERROR finding free time: %s", e, exc_info=True)
+                await event.reply(f"❌ Не удалось найти свободное время: {e}")
             return
 
         # триггер "сделай встречу"
