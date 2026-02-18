@@ -13,6 +13,14 @@ Telegram userbot for chat monitoring, AI summarization, and Bitrix24 calendar in
 - **"Гринкеев"** trigger: responds with a rare pig fact (GPT-generated, high temperature for creativity)
 - **"Ситников"** trigger: responds with a Seneca quote
 
+### Jira Task Creation
+Write in any chat (as a reply to the task text):
+```
+Создай задачу DC
+```
+
+The bot will create a Jira issue in the specified project with the reply message as description.
+
 ### Free Slot Finder (Bitrix24)
 Write in any chat:
 ```
@@ -65,6 +73,7 @@ Swagger UI available at `http://localhost:8001/docs`.
 - Telegram API credentials (`API_ID`, `API_HASH` from https://my.telegram.org)
 - OpenAI API key
 - Bitrix24 OAuth app (for calendar features)
+- Jira Server (for task creation)
 
 ### Installation
 
@@ -93,6 +102,9 @@ Required variables:
 | `BITRIX_CLIENT_ID` | Bitrix24 OAuth client ID |
 | `BITRIX_CLIENT_SECRET` | Bitrix24 OAuth client secret |
 | `BITRIX_REFRESH_TOKEN` | Initial Bitrix24 refresh token |
+| `JIRA_URL` | Jira Server URL |
+| `JIRA_USERNAME` | Jira username |
+| `JIRA_PASSWORD` | Jira password |
 
 ### Telegram Authorization
 
@@ -112,13 +124,45 @@ uvicorn app.main:app --host 0.0.0.0 --port 8001
 
 ```
 Uvicorn (event loop owner)
-  -> FastAPI (REST API)
-  -> Telethon (Telegram client, connected in lifespan)
-     -> Event handler (monitors all messages)
-        -> Triggers (summarization, auto-replies, meetings)
-  -> APScheduler (daily summary cron job)
-  -> Bitrix24 REST API (calendar, user search)
-  -> OpenAI GPT-5.2 (summarization, content generation)
+  -> FastAPI (REST API via api/routes.py)
+  -> Telethon (TelegramService singleton, connected in lifespan)
+     -> Trigger router (triggers/__init__.py — matches all messages)
+        -> Individual triggers (summarize, auto_reply, jira_task, free_slots, meeting)
+  -> APScheduler (daily summary cron job at 23:15)
+  -> Services (singleton classes with shared clients):
+     -> AIClient         — OpenAI GPT-5.2
+     -> BitrixClient     — Bitrix24 REST API (calendar, users, OAuth)
+     -> JiraClient       — Jira REST API (issue creation)
+     -> TelegramService  — Telethon client wrapper
+  -> ChatState (in-memory state: monitored chats, message buffer, daily tracking)
+```
+
+## Project Structure
+
+```
+app/
+  main.py                  # FastAPI app, lifespan, scheduler, daily_summary_job
+  config.py                # pydantic-settings from .env
+  chat_state.py            # ChatState — monitored chats, message buffer, daily tracking
+  utils.py                 # Parsers, constants, helpers
+  summarizer.py            # GPT summarization (single chat, daily overview)
+  compliments.py           # Wife compliment generator (disabled)
+  date_experiment.py       # Autonomous GPT dialog experiment
+  services/
+    ai_client.py           # AIClient singleton (OpenAI)
+    bitrix_client.py       # BitrixClient singleton (Bitrix24 REST API)
+    jira_client.py         # JiraClient singleton (Jira REST API)
+    telegram_service.py    # TelegramService singleton (Telethon)
+  triggers/
+    __init__.py            # register_all() — event router
+    summarize.py           # "суммаризация" trigger
+    auto_reply.py          # "ситников", "гринкеев" triggers
+    jira_task.py           # "создай задачу" trigger
+    free_slots.py          # "найди время" trigger
+    meeting.py             # "сделай/создай встречу" trigger
+  api/
+    routes.py              # REST API endpoints
+auth.py                    # One-time Telegram authorization
 ```
 
 ## Tech Stack
@@ -128,4 +172,4 @@ Uvicorn (event loop owner)
 - [OpenAI](https://platform.openai.com/) — GPT-5.2 for summarization and generation
 - [APScheduler](https://apscheduler.readthedocs.io/) — scheduled tasks
 - [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) — configuration
-- [httpx](https://www.python-httpx.org/) — async HTTP client for Bitrix24 API
+- [httpx](https://www.python-httpx.org/) — async HTTP client for Bitrix24 and Jira APIs
