@@ -1,3 +1,4 @@
+import logging
 import re
 
 from telethon import TelegramClient, events
@@ -10,6 +11,8 @@ from app.triggers.jira_task import handle_create_task
 from app.triggers.meeting import handle_create_meeting
 from app.triggers.summarize import handle_summarize
 
+logger = logging.getLogger("smartsummary")
+
 
 def register_all(client: TelegramClient):
     @client.on(events.NewMessage(incoming=True, outgoing=True))
@@ -20,6 +23,8 @@ def register_all(client: TelegramClient):
 
         if not text:
             return
+
+        logger.debug("[msg] chat=%s sender=%s text=%s", chat_id, sender, text[:80])
 
         if sender == settings.my_user_id:
             state.track_outgoing(chat_id)

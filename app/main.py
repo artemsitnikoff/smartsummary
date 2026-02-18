@@ -108,6 +108,7 @@ async def lifespan(app: FastAPI):
 
     register_all(tg.client)
     setup_experiment_handler(tg.client)
+    await tg.client.catch_up()
 
     scheduler.add_job(
         daily_summary_job,
