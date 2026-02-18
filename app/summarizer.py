@@ -1,15 +1,12 @@
 import logging
-from datetime import datetime, timedelta, timezone
-
-from openai import AsyncOpenAI
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.monitor import get_messages as get_buffered_messages
-from app.telegram_client import get_client
+from app.services.ai_client import AIClient
+from app.services.telegram_service import TelegramService
 
 logger = logging.getLogger("smartsummary")
-
-_openai_client: AsyncOpenAI | None = None
 
 TASK_SUMMARY_PROMPT = """\
 Проанализируй эту переписку из Telegram чата.
@@ -43,56 +40,6 @@ DAILY_OVERVIEW_PROMPT = """\
 """
 
 
-def get_openai_client() -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-    return _openai_client
-
-
-async def fetch_messages(chat_id: int, limit: int = 200) -> list[dict]:
-    client = get_client()
-    messages = await client.get_messages(chat_id, limit=limit)
-    return [
-        {
-            "sender": getattr(m.sender, "first_name", str(m.sender_id)),
-            "text": m.raw_text or "",
-            "date": m.date.isoformat(),
-        }
-        for m in messages
-        if m.raw_text
-    ]
-
-
-async def fetch_today_messages(chat_id: int) -> list[dict]:
-    """Fetch messages from today only (Novosibirsk timezone)."""
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    client = get_client()
-    messages = await client.get_messages(
-        chat_id,
-        limit=500,
-        offset_date=now,
-    )
-    result = []
-    for m in messages:
-        if not m.raw_text:
-            continue
-        msg_time = m.date.astimezone(tz)
-        if msg_time < start_of_day:
-            break
-        result.append({
-            "sender": getattr(m.sender, "first_name", str(m.sender_id)),
-            "text": m.raw_text,
-            "date": m.date.isoformat(),
-        })
-    return result
-
-
 def _format_messages(msgs: list[dict]) -> str:
     return "\n".join(
         f"[{m['date']}] {m.get('sender', m.get('sender_id', '?'))}: {m['text']}"
@@ -100,54 +47,81 @@ def _format_messages(msgs: list[dict]) -> str:
     )
 
 
+async def _fetch_messages(chat_id: int, since: datetime | None = None, limit: int = 500) -> list[dict]:
+    """Fetch messages from a chat. If `since` is given, only messages after that time."""
+    tg = TelegramService.get()
+    client = tg.client
+
+    if since:
+        tz = ZoneInfo(settings.timezone)
+        now = datetime.now(tz)
+        messages = await client.get_messages(chat_id, limit=limit, offset_date=now)
+        result = []
+        for m in messages:
+            if not m.raw_text:
+                continue
+            msg_time = m.date.astimezone(tz)
+            if msg_time < since:
+                break
+            result.append({
+                "sender": getattr(m.sender, "first_name", str(m.sender_id)),
+                "text": m.raw_text,
+                "date": m.date.isoformat(),
+            })
+        return result
+    else:
+        messages = await client.get_messages(chat_id, limit=limit)
+        return [
+            {
+                "sender": getattr(m.sender, "first_name", str(m.sender_id)),
+                "text": m.raw_text or "",
+                "date": m.date.isoformat(),
+            }
+            for m in messages
+            if m.raw_text
+        ]
+
+
+async def _summarize_messages(msgs: list[dict], max_tokens: int = 1024) -> str:
+    """Run GPT summarization on a list of messages."""
+    conversation = _format_messages(msgs)
+    ai = AIClient.get()
+    return await ai.complete(TASK_SUMMARY_PROMPT + conversation, max_tokens=max_tokens)
+
+
 async def summarize(chat_id: int, use_buffer: bool = False, limit: int = 200) -> str:
     if use_buffer:
-        msgs = get_buffered_messages(chat_id)
+        from app.chat_state import state
+        msgs = state.get_messages(chat_id)
     else:
-        msgs = await fetch_messages(chat_id, limit=limit)
+        msgs = await _fetch_messages(chat_id, limit=limit)
 
     if not msgs:
         return "Нет сообщений для суммаризации."
 
-    conversation = _format_messages(msgs)
     logger.info(">>> SUMMARIZE REQUEST: chat=%s, messages=%d", chat_id, len(msgs))
-
-    ai = get_openai_client()
-    response = await ai.chat.completions.create(
-        model=settings.openai_model,
-        max_completion_tokens=1024,
-        messages=[{"role": "user", "content": TASK_SUMMARY_PROMPT + conversation}],
-    )
-
-    result = response.choices[0].message.content.strip()
+    result = await _summarize_messages(msgs)
     logger.info("<<< SUMMARIZE RESPONSE:\n%s", result)
     return result
 
 
 async def summarize_chat_for_trigger(chat_id: int) -> str:
     """Summarize today's messages for in-chat trigger."""
-    msgs = await fetch_today_messages(chat_id)
+    tz = ZoneInfo(settings.timezone)
+    start_of_day = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    msgs = await _fetch_messages(chat_id, since=start_of_day)
     if not msgs:
         return "За сегодня в этом чате нет сообщений."
 
-    conversation = _format_messages(msgs)
     logger.info(">>> TRIGGER SUMMARIZE: chat=%s, messages=%d", chat_id, len(msgs))
-
-    ai = get_openai_client()
-    response = await ai.chat.completions.create(
-        model=settings.openai_model,
-        max_completion_tokens=1024,
-        messages=[{"role": "user", "content": TASK_SUMMARY_PROMPT + conversation}],
-    )
-
-    result = response.choices[0].message.content.strip()
+    result = await _summarize_messages(msgs)
     logger.info("<<< TRIGGER SUMMARIZE RESPONSE:\n%s", result)
     return result
 
 
 def _build_chat_link(entity) -> str:
-    """Build a clickable Telegram link for a chat entity (HTML format)."""
-    from telethon.tl.types import User, Channel, Chat
+    from telethon.tl.types import Channel, Chat, User
 
     if isinstance(entity, User):
         name = entity.first_name or str(entity.id)
@@ -161,13 +135,12 @@ def _build_chat_link(entity) -> str:
         name = entity.title or str(entity.id)
         if entity.username:
             return f'<a href="https://t.me/{entity.username}">{name}</a>'
-        # private channel/group: strip -100 prefix
         channel_id = entity.id
         return f'<a href="https://t.me/c/{channel_id}/1">{name}</a>'
 
     if isinstance(entity, Chat):
         name = entity.title or str(entity.id)
-        return name  # basic groups have no deep link
+        return name
 
     return str(getattr(entity, "title", None) or getattr(entity, "first_name", str(entity)))
 
@@ -177,7 +150,8 @@ async def summarize_single_chat(chat_id: int) -> tuple[str, str, str] | None:
 
     Returns (chat_name, chat_link_html, summary_text) or None if no messages.
     """
-    client = get_client()
+    tg = TelegramService.get()
+    client = tg.client
     try:
         entity = await client.get_entity(chat_id)
     except Exception as e:
@@ -187,50 +161,28 @@ async def summarize_single_chat(chat_id: int) -> tuple[str, str, str] | None:
     chat_name = getattr(entity, "title", None) or getattr(entity, "first_name", str(chat_id))
     chat_link = _build_chat_link(entity)
 
-    msgs = await fetch_today_messages(chat_id)
+    tz = ZoneInfo(settings.timezone)
+    start_of_day = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    msgs = await _fetch_messages(chat_id, since=start_of_day)
     if not msgs:
         return None
 
-    conversation = _format_messages(msgs)
     logger.info(">>> SINGLE CHAT SUMMARY: chat=%s (%s), messages=%d", chat_id, chat_name, len(msgs))
-
-    ai = get_openai_client()
-    response = await ai.chat.completions.create(
-        model=settings.openai_model,
-        max_completion_tokens=1024,
-        messages=[{"role": "user", "content": TASK_SUMMARY_PROMPT + conversation}],
-    )
-
-    summary = response.choices[0].message.content.strip()
+    summary = await _summarize_messages(msgs)
     logger.info("<<< SINGLE CHAT SUMMARY for %s:\n%s", chat_name, summary)
     return chat_name, chat_link, summary
 
 
 async def build_daily_overview(chat_summaries: list[tuple[str, str]]) -> str:
-    """Build an overall daily analysis from individual chat summaries.
-
-    Args:
-        chat_summaries: list of (chat_name, summary_text) tuples.
-
-    Returns:
-        HTML-formatted overview text.
-    """
     parts = []
     for name, summary in chat_summaries:
-        # обрезаем каждый саммари до ~500 символов чтобы не перегрузить контекст
         short = summary[:500] + "..." if len(summary) > 500 else summary
         parts.append(f"--- {name} ---\n{short}")
 
     full_text = "\n\n".join(parts)
     logger.info(">>> DAILY OVERVIEW: %d chats, input length: %d chars", len(chat_summaries), len(full_text))
 
-    ai = get_openai_client()
-    response = await ai.chat.completions.create(
-        model=settings.openai_model,
-        max_completion_tokens=1500,
-        messages=[{"role": "user", "content": DAILY_OVERVIEW_PROMPT + full_text}],
-    )
-
-    result = response.choices[0].message.content.strip()
+    ai = AIClient.get()
+    result = await ai.complete(DAILY_OVERVIEW_PROMPT + full_text, max_tokens=1500)
     logger.info("<<< DAILY OVERVIEW RESPONSE:\n%s", result)
     return result

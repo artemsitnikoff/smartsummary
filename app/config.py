@@ -6,10 +6,6 @@ class Settings(BaseSettings):
     api_hash: str
     session_name: str = "smartsummary"
 
-    anthropic_api_key: str = ""
-    ai_model: str = "claude-sonnet-4-20250514"
-    summary_message_limit: int = 200
-
     openai_api_key: str = ""
     openai_model: str = "gpt-5.2"
 

@@ -6,10 +6,10 @@
 import asyncio
 import logging
 
-from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 
 from app.config import settings
+from app.services.ai_client import AIClient
 
 logger = logging.getLogger("smartsummary")
 
@@ -37,15 +37,8 @@ class DateExperiment:
         self.name = name
         self.active = False
         self.conversation: list[dict] = []
-        self.openai: AsyncOpenAI | None = None
-        self.client: TelegramClient | None = None
         self._reply_count = 0
         self._max_replies = 15
-
-    def _get_openai(self) -> AsyncOpenAI:
-        if self.openai is None:
-            self.openai = AsyncOpenAI(api_key=settings.openai_api_key)
-        return self.openai
 
     @property
     def system_prompt(self) -> str:
@@ -57,21 +50,13 @@ class DateExperiment:
 
         messages = [{"role": "system", "content": self.system_prompt}] + self.conversation
 
-        ai = self._get_openai()
-        response = await ai.chat.completions.create(
-            model=settings.openai_model,
-            max_completion_tokens=200,
-            temperature=0.9,
-            messages=messages,
-        )
-
-        reply = response.choices[0].message.content.strip()
+        ai = AIClient.get()
+        reply = await ai.chat(messages, max_tokens=200, temperature=0.9)
         self.conversation.append({"role": "assistant", "content": reply})
         logger.info("<<< EXPERIMENT [%s] GPT reply: %s", self.name, reply)
         return reply
 
     async def start(self, client: TelegramClient):
-        self.client = client
         self.active = True
         self.conversation = []
         self._reply_count = 0
@@ -116,7 +101,6 @@ class DateExperiment:
         await event.reply(reply)
 
     async def nudge(self, client: TelegramClient):
-        """Отправить напоминание, не дожидаясь ответа."""
         if not self.active:
             return None
         self.conversation.append({
@@ -124,8 +108,10 @@ class DateExperiment:
             "content": "(она молчит, напиши ей ещё раз — напомни о себе, коротко и с юмором)"
         })
         reply = await self._generate_reply()
-        # убираем фейковую "user" инструкцию из истории
-        self.conversation = [m for m in self.conversation if m.get("content") != "(она молчит, напиши ей ещё раз — напомни о себе, коротко и с юмором)"]
+        self.conversation = [
+            m for m in self.conversation
+            if m.get("content") != "(она молчит, напиши ей ещё раз — напомни о себе, коротко и с юмором)"
+        ]
         await client.send_message(self.chat_id, reply)
         logger.info(">>> EXPERIMENT [%s] nudge sent: %s", self.name, reply)
         return reply
@@ -135,7 +121,6 @@ class DateExperiment:
         logger.info(">>> EXPERIMENT [%s] stopped. Exchanges: %d", self.name, self._reply_count)
 
 
-# Реестр активных экспериментов: chat_id -> DateExperiment
 experiments: dict[int, DateExperiment] = {}
 
 

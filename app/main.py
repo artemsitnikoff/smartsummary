@@ -1,19 +1,20 @@
 import asyncio
 import logging
-import re
 from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-
 from fastapi import FastAPI
 
 from app.api.routes import router
 from app.config import settings
-
 from app.date_experiment import setup_experiment_handler
-from app.monitor import setup_handlers
-from app.telegram_client import get_client
+from app.services.bitrix_client import BitrixClient
+from app.services.jira_client import JiraClient
+from app.services.telegram_service import TelegramService
+from app.triggers import register_all
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,62 +28,31 @@ scheduler = AsyncIOScheduler()
 
 async def get_today_dialogs() -> list[int]:
     """Get today's personal (1-on-1) chats + configured report groups."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
     tz = ZoneInfo(settings.timezone)
     start_of_day = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    client = get_client()
-    dialogs = await client.get_dialogs()
+    tg = TelegramService.get()
+    dialogs = await tg.client.get_dialogs()
     today_chats = []
     for d in dialogs:
         if not d.date or d.date.astimezone(tz) < start_of_day:
             continue
-        # личные чаты (не группы, не каналы)
         if d.is_user:
             today_chats.append(d.id)
-        # группы из справочника
         elif d.id in settings.report_group_ids:
             today_chats.append(d.id)
 
-    logger.info("=== Found %d dialogs for report (%d personal + groups from config)",
-                len(today_chats), sum(1 for d in dialogs if d.is_user and d.date and d.date.astimezone(tz) >= start_of_day))
+    logger.info(
+        "=== Found %d dialogs for report (%d personal + groups from config)",
+        len(today_chats),
+        sum(1 for d in dialogs if d.is_user and d.date and d.date.astimezone(tz) >= start_of_day),
+    )
     return today_chats
-
-
-TG_MSG_LIMIT = 4096
-
-
-def clean_html(text: str) -> str:
-    """Convert markdown to Telegram-safe HTML."""
-    # **bold** → <b>bold</b>
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    # <br>, <br/>, <br /> → newline
-    text = re.sub(r"<br\s*/?>", "\n", text)
-    # strip unsupported HTML tags (keep only b, i, u, s, a, code, pre)
-    text = re.sub(r"</?(?!b|/b|i|/i|u|/u|s|/s|a|/a|code|/code|pre|/pre)[^>]+>", "", text)
-    return text
-
-
-async def send_long_message(client, text: str, parse_mode: str = "html"):
-    """Send a message to Saved Messages, splitting if > 4096 chars."""
-    while text:
-        if len(text) <= TG_MSG_LIMIT:
-            await client.send_message("me", text, parse_mode=parse_mode)
-            break
-        # ищем последний перенос строки до лимита
-        cut = text.rfind("\n", 0, TG_MSG_LIMIT)
-        if cut == -1:
-            cut = TG_MSG_LIMIT
-        await client.send_message("me", text[:cut], parse_mode=parse_mode)
-        text = text[cut:].lstrip("\n")
-        await asyncio.sleep(2)
 
 
 async def daily_summary_job():
     """Summarizes each chat with today's messages, then sends overall analysis."""
-    from app.summarizer import summarize_single_chat, build_daily_overview
+    from app.summarizer import build_daily_overview, summarize_single_chat
 
     today_chats = await get_today_dialogs()
 
@@ -90,9 +60,9 @@ async def daily_summary_job():
         logger.info("=== No chats with messages today, skipping")
         return
 
-    client = get_client()
+    tg = TelegramService.get()
     chat_summaries = []
-    parts = []  # блоки текста для группировки
+    parts = []
 
     for chat_id in today_chats:
         try:
@@ -100,7 +70,7 @@ async def daily_summary_job():
             if result is None:
                 continue
             name, link, summary = result
-            summary_html = clean_html(summary)
+            summary_html = tg.clean_html(summary)
             block = f"#summary\n📋 <b>{name}</b>\n{link}\n\n{summary_html}"
             parts.append(block)
             chat_summaries.append((name, summary))
@@ -109,20 +79,18 @@ async def daily_summary_job():
             logger.error("=== DAILY SUMMARY ERROR for chat %s: %s", chat_id, e, exc_info=True)
 
     if not chat_summaries:
-        await client.send_message("me", "📋 Дневной отчёт: за сегодня нет чатов с сообщениями.")
+        await tg.client.send_message("me", "📋 Дневной отчёт: за сегодня нет чатов с сообщениями.")
         return
 
-    # группируем блоки в сообщения по ~4096 символов
     full_text = "\n\n━━━━━━━━━━━━━━━\n\n".join(parts)
-    await send_long_message(client, full_text)
+    await tg.send_long_message(full_text)
     logger.info("=== Daily summaries sent: %d chats", len(chat_summaries))
 
-    # финальный обзор дня
     await asyncio.sleep(2)
     try:
         overview = await build_daily_overview(chat_summaries)
-        overview_html = clean_html(overview)
-        await send_long_message(client, f"#summary\n📊 <b>Обзор дня</b>\n\n{overview_html}")
+        overview_html = tg.clean_html(overview)
+        await tg.send_long_message(f"#summary\n📊 <b>Обзор дня</b>\n\n{overview_html}")
         logger.info("=== Daily overview sent")
     except Exception as e:
         logger.error("=== DAILY OVERVIEW ERROR: %s", e, exc_info=True)
@@ -130,17 +98,17 @@ async def daily_summary_job():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    client = get_client()
-    await client.connect()
-    if not await client.is_user_authorized():
-        await client.disconnect()
+    tg = TelegramService.get()
+    await tg.connect()
+    if not await tg.is_authorized():
+        await tg.disconnect()
         raise RuntimeError(
             "Telegram session not authorized. Run 'python auth.py' first."
         )
-    setup_handlers(client)
-    setup_experiment_handler(client)
 
-    # расписание: дневной отчёт
+    register_all(tg.client)
+    setup_experiment_handler(tg.client)
+
     scheduler.add_job(
         daily_summary_job,
         CronTrigger(hour=23, minute=15, timezone=settings.timezone),
@@ -152,7 +120,9 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown()
-    await client.disconnect()
+    await tg.disconnect()
+    await BitrixClient.get().close()
+    await JiraClient.get().close()
 
 
 app = FastAPI(title="SmartSummary", lifespan=lifespan)

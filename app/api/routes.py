@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app import monitor, summarizer
+from app import summarizer
+from app.chat_state import state
 from app.date_experiment import experiments, get_or_create
-from app.telegram_client import get_client
+from app.services.telegram_service import TelegramService
 
 router = APIRouter()
 
@@ -25,15 +26,15 @@ class ExperimentStart(BaseModel):
 
 @router.get("/me")
 async def whoami():
-    client = get_client()
-    me = await client.get_me()
+    tg = TelegramService.get()
+    me = await tg.client.get_me()
     return {"id": me.id, "name": me.first_name, "username": me.username}
 
 
 @router.get("/chats")
 async def list_dialogs():
-    client = get_client()
-    dialogs = await client.get_dialogs(limit=50)
+    tg = TelegramService.get()
+    dialogs = await tg.client.get_dialogs(limit=50)
     return [
         {"id": d.id, "name": d.name, "unread": d.unread_count}
         for d in dialogs
@@ -42,24 +43,24 @@ async def list_dialogs():
 
 @router.get("/monitor")
 async def list_monitored():
-    return {"monitored": monitor.get_monitored()}
+    return {"monitored": state.get_monitored()}
 
 
 @router.post("/monitor/add")
 async def add_monitor(body: ChatIdBody):
-    monitor.add_chat(body.chat_id)
-    return {"status": "ok", "monitored": monitor.get_monitored()}
+    state.add_monitored(body.chat_id)
+    return {"status": "ok", "monitored": state.get_monitored()}
 
 
 @router.post("/monitor/remove")
 async def remove_monitor(body: ChatIdBody):
-    monitor.remove_chat(body.chat_id)
-    return {"status": "ok", "monitored": monitor.get_monitored()}
+    state.remove_monitored(body.chat_id)
+    return {"status": "ok", "monitored": state.get_monitored()}
 
 
 @router.get("/monitor/{chat_id}/messages")
 async def get_buffered_messages(chat_id: int):
-    msgs = monitor.get_messages(chat_id)
+    msgs = state.get_messages(chat_id)
     return {"chat_id": chat_id, "count": len(msgs), "messages": msgs}
 
 
@@ -92,8 +93,8 @@ async def start_experiment(body: ExperimentStart):
     exp = get_or_create(body.chat_id, body.name)
     if exp.active:
         return {"status": "already_running", "chat_id": body.chat_id, "name": body.name}
-    client = get_client()
-    await exp.start(client)
+    tg = TelegramService.get()
+    await exp.start(tg.client)
     return {"status": "started", "chat_id": body.chat_id, "name": body.name}
 
 
@@ -111,8 +112,8 @@ async def nudge_experiment(body: ChatIdBody):
     exp = experiments.get(body.chat_id)
     if not exp or not exp.active:
         return {"status": "not_active"}
-    client = get_client()
-    msg = await exp.nudge(client)
+    tg = TelegramService.get()
+    msg = await exp.nudge(tg.client)
     return {"status": "sent", "message": msg}
 
 
@@ -127,5 +128,3 @@ async def experiment_status():
             "conversation": exp.conversation,
         }
     return result
-
-

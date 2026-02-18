@@ -1,22 +1,12 @@
 import logging
 import random
 
-from openai import AsyncOpenAI
-
 from app.config import settings
-from app.telegram_client import get_client
+from app.services.ai_client import AIClient
+from app.services.telegram_service import TelegramService
+from app.utils import strip_numbered_item
 
 logger = logging.getLogger("smartsummary")
-
-_openai_client: AsyncOpenAI | None = None
-
-
-def get_openai_client() -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-    return _openai_client
-
 
 COMPLIMENT_PROMPT = """\
 Ты — опытный семейный психолог, который помогает мужу наладить отношения с женой. \
@@ -45,27 +35,16 @@ async def send_compliment():
     logger.info("=== COMPLIMENT JOB started")
 
     try:
-        ai = get_openai_client()
-        response = await ai.chat.completions.create(
-            model=settings.openai_model,
-            max_completion_tokens=500,
-            temperature=1.1,
-            messages=[{"role": "user", "content": COMPLIMENT_PROMPT}],
-        )
-
-        text = response.choices[0].message.content.strip()
+        ai = AIClient.get()
+        text = await ai.complete(COMPLIMENT_PROMPT, max_tokens=500, temperature=1.1)
         logger.info("<<< COMPLIMENT GPT RESPONSE:\n%s", text)
 
         variants = [line.strip() for line in text.split("\n") if line.strip()]
-        compliment = random.choice(variants)
-        # убираем нумерацию
-        if len(compliment) > 2 and compliment[0].isdigit() and compliment[1] in ".)":
-            compliment = compliment[2:].strip()
-
+        compliment = strip_numbered_item(random.choice(variants))
         logger.info("=== Selected compliment: %s", compliment)
 
-        client = get_client()
-        await client.send_message(settings.wife_chat_id, compliment)
+        tg = TelegramService.get()
+        await tg.client.send_message(settings.wife_chat_id, compliment)
         logger.info("=== Compliment sent to wife (chat=%s)", settings.wife_chat_id)
 
     except Exception as e:
