@@ -2,6 +2,7 @@ import asyncio
 import re
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from app.config import settings
 
@@ -12,8 +13,12 @@ class TelegramService:
     _instance: "TelegramService | None" = None
 
     def __init__(self):
+        if settings.telegram_session:
+            session = StringSession(settings.telegram_session)
+        else:
+            session = settings.session_name
         self._client = TelegramClient(
-            settings.session_name, settings.api_id, settings.api_hash
+            session, settings.api_id, settings.api_hash
         )
 
     @classmethod

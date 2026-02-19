@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     api_id: int
     api_hash: str
     session_name: str = "data/smartsummary"
+    telegram_session: str = ""  # StringSession (приоритет над session_name)
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5.2"
