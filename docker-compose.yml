@@ -1,0 +1,12 @@
+services:
+  smartsummary:
+    build: .
+    container_name: smartsummary
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - ./smartsummary.session:/app/smartsummary.session
+      - ./bitrix_tokens.json:/app/bitrix_tokens.json

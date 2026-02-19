@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.session
+*.session-journal
+bitrix_tokens.json
+.git/
+.gitignore
+.ruff_cache/
+.pytest_cache/
+.claude/
+CLAUDE.md
+README.md
