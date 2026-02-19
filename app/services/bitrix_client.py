@@ -10,7 +10,7 @@ from app.config import settings
 
 logger = logging.getLogger("smartsummary")
 
-TOKENS_FILE = Path(__file__).resolve().parent.parent.parent / "bitrix_tokens.json"
+TOKENS_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "bitrix_tokens.json"
 OAUTH_URL = "https://oauth.bitrix24.tech/oauth/token"
 
 

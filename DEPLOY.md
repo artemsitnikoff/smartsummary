@@ -15,14 +15,15 @@ git clone https://github.com/artemsitnikoff/smartsummary.git
 cd smartsummary
 ```
 
-### 2. Создать `.env`
+### 2. Создать `.env` и `data/`
 
 ```bash
 cp .env.example .env
 nano .env
+mkdir -p data
 ```
 
-Заполнить все поля:
+Заполнить все поля в `.env`:
 
 | Переменная | Описание |
 |---|---|
@@ -45,7 +46,7 @@ nano .env
 docker compose run --rm smartsummary python auth.py
 ```
 
-Ввести номер телефона и код из Telegram. Появится файл `smartsummary.session`.
+Ввести номер телефона и код из Telegram. Сессия сохранится в `data/smartsummary.session`.
 
 ### 4. Запустить
 
@@ -100,10 +101,10 @@ docker compose build --no-cache && docker compose up -d
 | Файл | Описание |
 |---|---|
 | `.env` | Секреты и конфигурация |
-| `smartsummary.session` | Telegram-сессия (создаётся через `auth.py`) |
-| `bitrix_tokens.json` | OAuth токены Bitrix24 (создаётся автоматически) |
+| `data/smartsummary.session` | Telegram-сессия (создаётся через `auth.py`) |
+| `data/bitrix_tokens.json` | OAuth токены Bitrix24 (создаётся автоматически) |
 
-Эти файлы монтируются в контейнер через volumes в `docker-compose.yml`.
+Директория `data/` монтируется в контейнер через volumes в `docker-compose.yml`.
 
 ## Проверка работоспособности
 

@@ -8,5 +8,4 @@ services:
     env_file:
       - .env
     volumes:
-      - ./smartsummary.session:/app/smartsummary.session
-      - ./bitrix_tokens.json:/app/bitrix_tokens.json
+      - ./data:/app/data

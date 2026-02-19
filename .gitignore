@@ -1,6 +1,5 @@
 .env
-*.session
-*.session-journal
+data/
 __pycache__/
 *.pyc
 .ruff_cache/
@@ -8,5 +7,4 @@ __pycache__/
 dist/
 *.egg-info/
 .venv/
-bitrix_tokens.json
 .claude/

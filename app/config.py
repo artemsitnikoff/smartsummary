@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     api_id: int
     api_hash: str
-    session_name: str = "smartsummary"
+    session_name: str = "data/smartsummary"
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5.2"
